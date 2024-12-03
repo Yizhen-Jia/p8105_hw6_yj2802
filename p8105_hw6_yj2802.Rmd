@@ -11,6 +11,8 @@ library(tidyverse)
 library(modelr)
 library(broom)
 library(purrr)
+library(boot)
+library(knitr)
 ```
 
 ## Problem 1
@@ -29,50 +31,82 @@ weather_df =
   select(name, id, everything())
 ```
 
+This dataset has `r nrow(weather_df)` observations and `r ncol(weather_df)` variables (`r colnames(weather_df)`)
 
 ```{r}
-# Perform bootstrap sampling and calculate desired quantities
-set.seed(123) # For reproducibility
-bootstrap_results = 
-  weather_df |> 
-  bootstrap(n = 5000) |> 
-  mutate(
-    models = map(strap, ~ lm(tmax ~ tmin, data = .x)), # Fit linear models
-    r_squared = map_dbl(models, ~ broom::glance(.x)$r.squared), # Extract R^2
-    log_beta_product = map_dbl(models, ~ {
-      coef_vals = broom::tidy(.x)$estimate # Extract coefficients
-      log(coef_vals[1] * coef_vals[2]) # Compute log(β̂₀ * β̂₁)
-    })
-  )
+# Function for Bootstrap Analysis
+bootstrap_analysis = function(data, indices) {
+  bootstrap_sample = data[indices, ] # Generate bootstrap sample
+  
+  # Fit the linear regression model
+  bootstrap_fit = lm(tmax ~ tmin, data = bootstrap_sample)
+  
+  # Extract R-squared
+  r_squared = broom::glance(bootstrap_fit)$r.squared
+  
+  # Extract coefficients and compute log(beta_0 * beta_1)
+  coefs = broom::tidy(bootstrap_fit) |>
+    filter(term %in% c("(Intercept)", "tmin")) |>
+    pull(estimate)
+  log_beta_product = log(coefs[1] * coefs[2])
+  
+  return(c(r_squared = r_squared, log_beta_product = log_beta_product))
+}
 
-# Summarize bootstrap distributions
-bootstrap_summary = 
-  bootstrap_results |> 
-  summarize(
-    r_squared_mean = mean(r_squared),
-    r_squared_ci = quantile(r_squared, c(0.025, 0.975)),
-    log_beta_product_mean = mean(log_beta_product),
-    log_beta_product_ci = quantile(log_beta_product, c(0.025, 0.975))
-  )
+# Perform Bootstrap Resampling
+set.seed(123)
+bootstrap_results = boot(
+  data = weather_df,
+  statistic = function(data, indices) unlist(bootstrap_analysis(data, indices)),
+  R = 5000
+)
 
-# Print summaries
-print(bootstrap_summary)
+# Create a Data Frame of Bootstrap Results
+bootstrap_df = as_tibble(bootstrap_results$t) |>
+  rename(r_squared = V1, log_beta_product = V2)
 
-# Plot bootstrap distributions
-bootstrap_results |> 
-  pivot_longer(cols = c(r_squared, log_beta_product), names_to = "statistic", values_to = "value") |> 
-  ggplot(aes(x = value, fill = statistic)) +
-  geom_density(alpha = 0.7) +
-  facet_wrap(~statistic, scales = "free") +
+# Plot Distribution of R-squared
+r_squared_plot = bootstrap_df |>
+  ggplot(aes(x = r_squared)) +
+  geom_density(fill = "blue", alpha = 0.5) +
   labs(
-    title = "Bootstrap Distributions",
-    x = "Value",
-    y = "Density",
-    fill = "Statistic"
+    title = "Bootstrap Distribution of R-squared",
+    x = "R-squared",
+    y = "Density"
   ) +
   theme_minimal()
-```
 
+print(r_squared_plot)
+
+# Plot Distribution of log(beta_0 * beta_1)
+log_beta_plot = bootstrap_df |>
+  ggplot(aes(x = log_beta_product)) +
+  geom_density(fill = "red", alpha = 0.5) +
+  labs(
+    title = "Bootstrap Distribution of log(beta_0 * beta_1)",
+    x = "log(beta_0 * beta_1)",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+print(log_beta_plot)
+
+# Compute 95% Confidence Intervals
+ci_r_squared = quantile(bootstrap_df$r_squared, probs = c(0.025, 0.975))
+ci_log_beta_product = quantile(bootstrap_df$log_beta_product, probs = c(0.025, 0.975))
+
+ci_df = tibble(
+  Metric = c("R-squared", "log(beta_0 * beta_1)"),
+  `Lower 2.5%` = c(ci_r_squared[1], ci_log_beta_product[1]),
+  `Upper 97.5%` = c(ci_r_squared[2], ci_log_beta_product[2])
+)
+
+knitr::kable(ci_df, caption = "95% Confidence Intervals for Bootstrap Estimates")
+
+# Final Outputs
+ci_r_squared
+ci_log_beta_product
+```
 
 
 ## Problem 2
@@ -83,6 +117,7 @@ homicides = read_csv(url)
 problem2 = 
   homicides |> 
   mutate(
+    across(where(is.character), ~ na_if(., "Unknown")), 
     city_state = str_c(city, state, sep = ", "),
     victim_age = as.numeric(victim_age),
     resolution = case_when(
@@ -91,7 +126,7 @@ problem2 =
     )
   ) |> 
   filter(
-    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")), # Remove specified cities
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")),
     victim_race %in% c("White", "Black"),
     !is.na(victim_age)
   ) |> 
@@ -154,7 +189,7 @@ model |>
   geom_errorbar(aes(ymin = OR_CI_lower, ymax = OR_CI_upper), width = 0.2) + 
   labs(
     x = "City, State",
-    y = "Odds Ratio (OR)",
+    y = "OR",
     title = "Adjusted Odds Ratios for Solving Homicides",
     subtitle = "Comparing male victims to female victims by city"
   ) + 
