@@ -6,9 +6,74 @@ output: github_document
 ---
 
 ```{r}
+library(p8105.datasets)
 library(tidyverse)
 library(modelr)
+library(broom)
+library(purrr)
 ```
+
+## Problem 1
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+
+```{r}
+# Perform bootstrap sampling and calculate desired quantities
+set.seed(123) # For reproducibility
+bootstrap_results = 
+  weather_df |> 
+  bootstrap(n = 5000) |> 
+  mutate(
+    models = map(strap, ~ lm(tmax ~ tmin, data = .x)), # Fit linear models
+    r_squared = map_dbl(models, ~ broom::glance(.x)$r.squared), # Extract R^2
+    log_beta_product = map_dbl(models, ~ {
+      coef_vals = broom::tidy(.x)$estimate # Extract coefficients
+      log(coef_vals[1] * coef_vals[2]) # Compute log(β̂₀ * β̂₁)
+    })
+  )
+
+# Summarize bootstrap distributions
+bootstrap_summary = 
+  bootstrap_results |> 
+  summarize(
+    r_squared_mean = mean(r_squared),
+    r_squared_ci = quantile(r_squared, c(0.025, 0.975)),
+    log_beta_product_mean = mean(log_beta_product),
+    log_beta_product_ci = quantile(log_beta_product, c(0.025, 0.975))
+  )
+
+# Print summaries
+print(bootstrap_summary)
+
+# Plot bootstrap distributions
+bootstrap_results |> 
+  pivot_longer(cols = c(r_squared, log_beta_product), names_to = "statistic", values_to = "value") |> 
+  ggplot(aes(x = value, fill = statistic)) +
+  geom_density(alpha = 0.7) +
+  facet_wrap(~statistic, scales = "free") +
+  labs(
+    title = "Bootstrap Distributions",
+    x = "Value",
+    y = "Density",
+    fill = "Statistic"
+  ) +
+  theme_minimal()
+```
+
+
 
 ## Problem 2
 ```{r}
@@ -16,17 +81,20 @@ url = "https://raw.githubusercontent.com/washingtonpost/data-homicides/master/ho
 homicides = read_csv(url)
 
 problem2 = 
-homicides |> 
+  homicides |> 
   mutate(
     city_state = str_c(city, state, sep = ", "),
     victim_age = as.numeric(victim_age),
     resolution = case_when(
-      disposition == "Closed without arrest" ~ 0,
-      disposition == "Open/No arrest"        ~ 0,
-      disposition == "Closed by arrest"      ~ 1)
+      disposition %in% c("Closed without arrest", "Open/No arrest") ~ 0,
+      disposition == "Closed by arrest" ~ 1
+    )
   ) |> 
-  filter(!(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO","Tulsa, AL"))) |> 
-  filter(victim_race %in% c("White", "Black")) |> 
+  filter(
+    !(city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")), # Remove specified cities
+    victim_race %in% c("White", "Black"),
+    !is.na(victim_age)
+  ) |> 
   select(city_state, resolution, victim_age, victim_sex, victim_race)
 ```
 
@@ -34,15 +102,17 @@ homicides |>
 
 ```{r}
 baltimore_glm = 
-  filter(problem2, city_state == "Baltimore, MD") |> 
+  problem2 |> 
+  filter(city_state == "Baltimore, MD") |> 
   glm(resolution ~ victim_age + victim_sex + victim_race, family = binomial(), data = _)
 
 baltimore_glm |> 
   broom::tidy() |> 
   mutate(
-    OR = exp(estimate), 
-    OR_CI_upper = exp(estimate + 1.96 * std.error),
-    OR_CI_lower = exp(estimate - 1.96 * std.error)) |> 
+    OR = exp(estimate),
+    OR_CI_lower = exp(estimate - 1.96 * std.error),
+    OR_CI_upper = exp(estimate + 1.96 * std.error)
+  ) |> 
   filter(term == "victim_sexMale") |> 
   select(OR, OR_CI_lower, OR_CI_upper) |>
   knitr::kable(digits = 4)
@@ -55,19 +125,21 @@ model =
   problem2 |> 
   nest(data = -city_state) |> 
   mutate(
-    models = map(data, \(df) glm(resolution ~ victim_age + victim_sex + victim_race, 
-                             family = binomial(), data = df)),
-    tidy_models = map(models, broom::tidy)) |> 
-  select(-models, -data) |> 
+    models = map(data, ~ glm(resolution ~ victim_age + victim_sex + victim_race, 
+                              family = binomial(), data = .x)),
+    tidy_models = map(models, broom::tidy)
+  ) |> 
+  select(city_state, tidy_models) |> 
   unnest(cols = tidy_models) |> 
   mutate(
-    OR = exp(estimate), 
-    OR_CI_upper = exp(estimate + 1.96 * std.error),
-    OR_CI_lower = exp(estimate - 1.96 * std.error)) |> 
+    OR = exp(estimate),
+    OR_CI_lower = exp(estimate - 1.96 * std.error),
+    OR_CI_upper = exp(estimate + 1.96 * std.error)
+  ) |> 
   filter(term == "victim_sexMale") |> 
   select(city_state, OR, OR_CI_lower, OR_CI_upper)
 
-model |>
+model |> 
   slice(1:5) |> 
   knitr::kable(digits = 4)
 ```
@@ -76,10 +148,122 @@ model |>
 
 ```{r}
 model |> 
-  mutate(city_state = fct_reorder(city_state, OR)) |> 
+  mutate(city_state = fct_reorder(city_state, OR)) |>
   ggplot(aes(x = city_state, y = OR)) + 
   geom_point() + 
-  geom_errorbar(aes(ymin = OR_CI_lower, ymax = OR_CI_upper)) + 
+  geom_errorbar(aes(ymin = OR_CI_lower, ymax = OR_CI_upper), width = 0.2) + 
+  labs(
+    x = "City, State",
+    y = "Odds Ratio (OR)",
+    title = "Adjusted Odds Ratios for Solving Homicides",
+    subtitle = "Comparing male victims to female victims by city"
+  ) + 
+  theme_minimal() + 
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
+This plot shows the adjusted ORs and 95% CIs across cities.
+
+Albuquerque has the highest OR, suggesting potential higher odds of solving male victim cases compared to female victim cases (95% CI includes 1, not significant). Cities such as New York, Baton Rouge and Omaha have ORs and 95% CIs below 1, suggesting male victims are significantly less likely to have cases resolved compared to female victims. Cities with ORs close to 1, such as Tulsa, Atlanta, and Richmond, suggest minimal differences between genders.
+
+## Problem 3
+
+```{r}
+birthweight = 
+  read_csv("birthweight.csv", na = c("", "NA", "Unknown")) |> 
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8), labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+    parity = as.numeric(parity),
+    smoken = replace_na(smoken, 0),
+    wtgain = as.numeric(wtgain)
+  ) |> 
+  drop_na()
+```
+
+#### Model building
+
+```{r}
+# Full regression model for birthweight:
+model_full = 
+  lm(
+    bwt ~ babysex + bhead + blength + delwt + fincome + frace + gaweeks + malform + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + ppbmi + ppwt + smoken + wtgain,
+    data = birthweight
+  )
+
+# Remove those are not significant at 0.05 significance level (one by one) to get the final model:
+model_final = 
+  lm(
+    bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken,
+    data = birthweight
+  )
+summary(model_final)
+```
+
+The modeling process began by exploring the relationships between birthweight and other variables through summary statistics to identify potential predictors. Firstly, a full regression model was constructed including all available variables hypothesized to influence birthweight. Using a data-driven approach, I iteratively removed variables with the highest p-values (greater than 0.05) one at a time to refine the model. The final model retained only significant predictors, ensuring that all variables had p-values below 0.05. This resulted in a parsimonious model with a Residual Standard Error of 272.3, an Adjusted R-squared of 0.7173, and a highly significant F-statistic (p < 0.0001), indicating strong explanatory power and a good fit for the data.
+
+#### Plot (Residuals vs Fitted Values):
+
+```{r}
+birthweight = 
+  birthweight |> 
+  add_predictions(model_final) |> 
+  add_residuals(model_final)
+
+birthweight |> 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Fitted Values (Birthweight/grams)",
+    y = "Residuals",
+    title = "Residuals vs Fitted Values",
+    subtitle = "Regression Model for Birthweight"
+  ) +
+  theme_minimal()
+```
+
+#### Comparing models:
+
+```{r}
+# Define model formulas
+formula_final = bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken
+formula_model2 = bwt ~ blength + gaweeks
+formula_model3 = bwt ~ bhead * blength * babysex
+
+# Function to calculate mean squared error (MSE)
+calculate_mse = function(formula, train, test) {
+  train_data = as_tibble(train$data)
+  test_data = as_tibble(test$data)
+  fitted_model = lm(formula, data = train_data)
+  predictions = predict(fitted_model, newdata = test_data)
+  mse = mean((test_data$bwt - predictions)^2, na.rm = TRUE)
+  return(mse)
+}
+
+# Cross-validation setup
+set.seed(123)
+cv_splits = crossv_mc(birthweight, n = 10)
+
+# Calculate MSE for each model
+mse_results = cv_splits |> 
+  mutate(
+    mse_final = map2_dbl(train, test, ~ calculate_mse(formula_final, .x, .y)),
+    mse_model2 = map2_dbl(train, test, ~ calculate_mse(formula_model2, .x, .y)),
+    mse_model3 = map2_dbl(train, test, ~ calculate_mse(formula_model3, .x, .y))
+  )
+
+# Summarize average MSE for each model
+mse_summary = mse_results |> 
+  summarize(
+    final_model_mse = mean(mse_final),
+    model2_mse = mean(mse_model2),
+    model3_mse = mean(mse_model3)
+  )
+mse_summary |>
+  knitr::kable(digits = 1)
+```
+
+My final model outperforms the other two models in terms of predictive accuracy, as indicated by its lowest cross-validated MSE of 73,925.9. The second model, which uses only birth length and gestational age as predictors, has the highest MSE of 110,957.1, reflecting its simplicity and limited explanatory power. The third model, which includes head circumference, birth length, sex, and all interactions, performs better than the second model with an MSE of 82,638.6, but its added complexity does not surpass the performance of my final model. This demonstrates that the final model strikes a good balance between complexity and predictive accuracy.
