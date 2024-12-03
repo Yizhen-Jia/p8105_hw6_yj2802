@@ -266,42 +266,46 @@ birthweight |>
 #### Comparing models:
 
 ```{r}
-# Define model formulas
-formula_final = bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken
-formula_model2 = bwt ~ blength + gaweeks
-formula_model3 = bwt ~ bhead * blength * babysex
-
-# Function to calculate mean squared error (MSE)
-calculate_mse = function(formula, train, test) {
-  train_data = as_tibble(train$data)
-  test_data = as_tibble(test$data)
-  fitted_model = lm(formula, data = train_data)
-  predictions = predict(fitted_model, newdata = test_data)
-  mse = mean((test_data$bwt - predictions)^2, na.rm = TRUE)
-  return(mse)
-}
-
-# Cross-validation setup
-set.seed(123)
-cv_splits = crossv_mc(birthweight, n = 10)
-
-# Calculate MSE for each model
-mse_results = cv_splits |> 
+crossv = 
+  crossv_mc(birthweight, 100) |>
   mutate(
-    mse_final = map2_dbl(train, test, ~ calculate_mse(formula_final, .x, .y)),
-    mse_model2 = map2_dbl(train, test, ~ calculate_mse(formula_model2, .x, .y)),
-    mse_model3 = map2_dbl(train, test, ~ calculate_mse(formula_model3, .x, .y))
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  ) |> 
+  mutate(
+    final_model = map(train, ~ lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken, data = .x)),
+    model2 = map(train, ~ lm(bwt ~ blength + gaweeks, data = .x)),
+    model3 = map(train, ~ lm(bwt ~ bhead * blength * babysex, data = .x))
+  ) |> 
+  mutate(
+    rmse_final = map2_dbl(final_model, test, ~rmse(model = .x, data = .y)),
+    rmse_model2 = map2_dbl(model2, test, ~rmse(model = .x, data = .y)),
+    rmse_model3 = map2_dbl(model3, test, ~rmse(model = .x, data = .y))
   )
 
-# Summarize average MSE for each model
-mse_summary = mse_results |> 
-  summarize(
-    final_model_mse = mean(mse_final),
-    model2_mse = mean(mse_model2),
-    model3_mse = mean(mse_model3)
-  )
-mse_summary |>
-  knitr::kable(digits = 1)
+crossv_plot = crossv |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  mutate(model = recode(model,
+                        final = "Final Model",
+                        model2 = "Model 2",
+                        model3 = "Model 3")) |> 
+  ggplot(aes(x = model, y = rmse, fill = model)) + 
+  geom_violin(alpha = 0.7) +
+  labs(
+    title = "RMSE Distribution Across Models",
+    x = "Model",
+    y = "RMSE"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(crossv_plot)
 ```
 
-My final model outperforms the other two models in terms of predictive accuracy, as indicated by its lowest cross-validated MSE of 73925.9. The second model, which uses only birth length and gestational age as predictors, has the highest MSE of 110957.1, reflecting its simplicity and limited explanatory power. The third model, which includes head circumference, birth length, sex, and all interactions, performs better than the second model with an MSE of 82638.6, but its added complexity does not surpass the performance of my final model. This demonstrates that the final model strikes a good balance between complexity and predictive accuracy.
+The plot shows the distribution of RMSE values for the three models across 100 cross-validation splits. The Final Model exhibits the lowest median RMSE and the least variability, indicating that it consistently performs well. Comparing to model 2 and model 3, the Final Model strikes the best balance between accuracy and stability.
